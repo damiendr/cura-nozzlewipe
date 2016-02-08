@@ -95,33 +95,23 @@ def make_hop(lines, i, retract, up, move, comment, down, extrude, after):
     if last_z is not None:
         yield GCode("G0", {"Z":last_z + z_relief}, "raise a bit")
 
-    E_down = float(extrude.args["E"])
-    E_up = float(retract.args["E"])
+    yield retract
 
     # Wipe the nozzle by retracing the last few steps without extruding:
-    F = retract.args["F"]
     if dist_before > 0.0 and takeoff_dist > 0.0:
         retraction_steps = []
         for step, dist in track_dist(back_and_forth(moves_before)):
-            E = E_down + (E_up - E_down) * min(1.0, dist/takeoff_dist)
             gcode = GCode("G1",
                 {"X":step.args["X"],
                 "Y":step.args["Y"],
-                "E":E,
-                "F":F}, "retract %.2f" % dist)
+                "F":3000}, "wipe takeoff %.2f" % dist)
             yield gcode
             retraction_steps.append(gcode)
-            if dist >= takeoff_dist: break
+            if dist >= takeoff_dist/2.0: break
 
-        # Retraction does not stop the flow immediately.
         # Retrace again, back to the start:
         for step in reversed(retraction_steps):
-            del step.args["E"]
-            step.args["F"] = F
             yield step
-    else:
-        # Not enough context moves, let's just retract in place:
-        yield retract
 
     # Hop to the next location, increasing Z gradually:
     if moves_before:
@@ -145,30 +135,22 @@ def make_hop(lines, i, retract, up, move, comment, down, extrude, after):
     for step, dist_after in track_dist(moves_after): pass
 
     if dist_after > 0.0 and landing_dist > 0.0:
-        E = E_up
-        F = extrude.args["F"]
         last_step = moves_after[0]
         landing_steps = []
         for step, dist in track_dist(back_and_forth(moves_after)):
-            landing_steps.append(step)
-            yield GCode("G1",
+            step = GCode("G1",
                 {"X":step.args["X"], "Y":step.args["Y"], "F":3000},
-                "wipe %.2f" % dist)
-            last_step = step
-            if dist >= landing_dist: break
+                "wipe landing %.2f" % dist)
+            yield step
+            landing_steps.append(step)
+            if dist >= landing_dist/2.0: break
 
-        for step, dist in track_dist(reversed(landing_steps)):
-            E = E_up + (E_down - E_up) * min(1.0, dist/landing_dist)
-            yield GCode("G1",
-                {"X":step.args["X"], "Y":step.args["Y"], "E":E, "F":F},
-                "extrude %.2f" % dist)
-            last_step = step
-        yield comment
-        yield down
-    else:
-        yield comment
-        yield down
-        yield extrude # Not enough context, extrude in place
+        for step in reversed(landing_steps):
+            yield step
+
+    yield extrude
+    yield comment
+    yield down
 
 
 def gcode_to_string(gcode):
