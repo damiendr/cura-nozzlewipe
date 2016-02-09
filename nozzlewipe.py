@@ -82,11 +82,11 @@ def back_and_forth(seq):
             yield o
 
 
-def make_hop(lines, i, retract, up, move, comment, down, extrude, after):
+def make_hop(lines, start, end, retract, up, move, section, down, extrude):
 
     yield GCode("", {}, "TYPE:Z-WIPE")
 
-    moves_before, last_z = extract_context(lines[i-7::-1], 20)
+    moves_before, last_z = extract_context(lines[start-1::-1], 20)
     dist_before = 0.0
     for step, dist_before in track_dist(moves_before): pass
 
@@ -130,7 +130,7 @@ def make_hop(lines, i, retract, up, move, comment, down, extrude, after):
 
     # The nozzle may have drooled a bit during the move. Wipe it again
     # upon landing:
-    moves_after, _ = extract_context(lines[i:], 20)
+    moves_after, _ = extract_context(lines[end:], 20)
     dist_after = 0.0
     for step, dist_after in track_dist(moves_after): pass
 
@@ -149,7 +149,7 @@ def make_hop(lines, i, retract, up, move, comment, down, extrude, after):
             yield step
 
     yield extrude
-    yield comment
+    if section: yield section
     yield down
 
 
@@ -162,6 +162,7 @@ def gcode_to_string(gcode):
         parts.append(";%s" % gcode.comment)
     return " ".join(parts)
 
+
 # Example match:
 # G1 F3000 E929.45693
 # G1 Z33.000
@@ -170,59 +171,90 @@ def gcode_to_string(gcode):
 # G1 Z32.700
 # G1 F3000 E934.45693
 hop_pattern = [
-    ("G1", ("FE",)),
-    ("G1", ("Z",)),
-    ("G0", ("FXY","FXYZ")),
-    ("", ("",)),
-    ("G1", ("Z",)),
-    ("G1", ("FE",)),
-    ("G1", ("FEXY",)),
+    ("G1", "FE", "retract", False),
+    ("G1", "Z", "up", False),
+    ("G0", lambda p: set("FXY").issubset(p), "move", False),
+    ("", "", "section", True),
+    ("G1", "Z", "down", False),
+    ("G1", "FE", "extrude", False),
 ]
 
-def match(gcode, pattern, idx):
-    cmd, args = pattern[idx]
-    return gcode.cmd == cmd and any(set(gcode.args.keys()) == set(expected)
-                                    for expected in args)
+class MatchResult(object):
+    def __init__(self, pattern):
+        self.fields = dict()
+        self.remaining = list(pattern)
+        self.start = -1
+        self.end = -1
+
+
+def match_gcode(gcode, match, i):
+    if not match.remaining: return i
+
+    cmd, args, name, optional = match.remaining[0]
+
+    if not callable(args):
+        match_args = lambda p: set(args) == p
+    else:
+        match_args = args
+    
+    matched = gcode.cmd == cmd and match_args(set(gcode.args.keys()))
+
+    if matched:
+        if match.start == -1: match.start = i
+        match.fields[name] = gcode
+        match.remaining.pop(0)
+        match.end = i
+        return -1
+
+    elif optional:
+        if match.start == -1: match.start = i
+        match.fields[name] = None
+        match.remaining.pop(0)
+        return match_gcode(gcode, match, i)
+
+    # Here: not matched, no optional
+    if match.start != -1:
+        return match.start
+    else:
+        return i
+
 
 
 def process(lines):
-    buf = []
-    for i, line in enumerate(lines):
-        gcode = parse_line(line)
+    match = MatchResult(hop_pattern)
+    end = len(lines)
+    i = 0
+    while i < end:
+
+        gcode = parse_line(lines[i])
 
         if gcode.cmd == "G91":
             raise Exception("Relative mode is not supported")
 
-        if len(buf) == 0:
-            if match(gcode, hop_pattern, 0):
-                buf.append(gcode)
-                continue
+        rewind = match_gcode(gcode, match, i)
+        if not match.remaining:
+            # Match complete:
+            for new_code in make_hop(lines, match.start, match.end, **match.fields):
+                yield new_code
+            match = MatchResult(hop_pattern)
 
-        if len(buf) > 0:
-            if match(gcode, hop_pattern, len(buf)):
-                buf.append(gcode)
+        if rewind != -1:
+            # The last line did not match, rewind to the specified position,
+            # pass that line through and start a new match:
+            if rewind != i:
+                gcode = parse_line(lines[rewind])
+                i = rewind
+            yield gcode
+            if match.start != -1:
+                match = MatchResult(hop_pattern)
 
-                if len(buf) == len(hop_pattern):
-#                    try:
-                    for new_code in make_hop(lines, i, *buf):
-                        yield new_code
-                    # except Exception as e:
-                    #     for cmd in buf:
-                    #         yield cmd
-                    # Done:
-                    buf = []
+        # next line:
+        i += 1
 
-                continue
-            else:
-                # Not all the lines matched. Empty the buffer:
-                for prev_gcode in buf: yield(prev_gcode)
-                buf = []
+    if match.remaining and match.start != -1:
+        for i in range(match.start, end):
+            yield parse_line(lines[i])
 
-        yield gcode
-
-    # Empty anything left in the buffer:
-    for gcode in buf: yield gcode
-    return
 
 
 if __name__ == "__main__":
