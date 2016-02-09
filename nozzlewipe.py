@@ -174,7 +174,7 @@ hop_pattern = [
     ("G1", "FE", "retract", False),
     ("G1", "Z", "up", False),
     ("G0", lambda p: set("FXY").issubset(p), "move", False),
-    ("", "", "section", True),
+    ("", "", "section", False),
     ("G1", "Z", "down", False),
     ("G1", "FE", "extrude", False),
 ]
